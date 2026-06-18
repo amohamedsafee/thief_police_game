@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math';
-import 'dart:ui';
 import 'dart:ui' as ui show PictureRecorder, Image, ImageByteFormat, Gradient;
 
 import 'package:flutter/foundation.dart';
@@ -14,6 +13,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:latlong2/latlong.dart' as latlng2;
 
 import '../core/game_dialog.dart';
+import '../core/design_system.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -65,13 +65,61 @@ class _PlayerData {
   int get hashCode => Object.hash(id, lat, lng, isPolice);
 }
 
-enum MapTrackingMode {
-  none,
-  follow,
-  navigation,
-}
+enum MapTrackingMode { none, follow, navigation }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
+
+class _MarkerAnimator {
+  _MarkerAnimator({
+    required this.vsync,
+    required LatLng start,
+    required LatLng end,
+    required this.onTick,
+  }) {
+    _controller = AnimationController(
+      vsync: vsync,
+      duration: const Duration(milliseconds: 1000),
+    );
+    _animation =
+        Tween<double>(begin: 0.0, end: 1.0).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
+        )..addListener(() {
+          onTick();
+        });
+
+    _start = start;
+    _end = end;
+    _controller.forward();
+  }
+
+  final TickerProvider vsync;
+  late final AnimationController _controller;
+  late final Animation<double> _animation;
+  final VoidCallback onTick;
+  late LatLng _start;
+  late LatLng _end;
+
+  LatLng get currentPosition {
+    if (!_controller.isAnimating && _controller.value == 1.0) {
+      return _end;
+    }
+    return LatLng(
+      _start.latitude + (_end.latitude - _start.latitude) * _animation.value,
+      _start.longitude + (_end.longitude - _start.longitude) * _animation.value,
+    );
+  }
+
+  void updateTarget(LatLng newTarget) {
+    _start = currentPosition;
+    _end = newTarget;
+    _controller.reset();
+    _controller.forward();
+  }
+
+  void dispose() {
+    _controller.dispose();
+  }
+}
 
 class FreeMapGameScreen extends StatefulWidget {
   const FreeMapGameScreen({
@@ -93,7 +141,10 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     with WidgetsBindingObserver, TickerProviderStateMixin {
   // Config state
   int _roomDurationSeconds = 40 * 60; // default 40 minutes
-  bool _recenterPressed = false;
+  bool _is3dMode = false;
+  bool _autoRotate = true;
+  String _roomName = '';
+  CameraPosition? _currentCameraPosition;
 
   // Firebase
   late final DatabaseReference _gameRef;
@@ -101,7 +152,8 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
   StreamSubscription<DatabaseEvent>? _gameStatusSubscription;
 
   // Map
-  final Completer<GoogleMapController> _mapController = Completer<GoogleMapController>();
+  final Completer<GoogleMapController> _mapController =
+      Completer<GoogleMapController>();
   MapTrackingMode _trackingMode = MapTrackingMode.follow;
   bool _isProgrammaticMove = false;
 
@@ -122,7 +174,10 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
   BitmapDescriptor? _policeIcon;
 
   // Location
-  latlng2.LatLng _currentLocation = const latlng2.LatLng(6.9271, 79.8612); // Colombo default
+  latlng2.LatLng _currentLocation = const latlng2.LatLng(
+    6.9271,
+    79.8612,
+  ); // Colombo default
   StreamSubscription<Position>? _positionSubscription;
   String _locationStatus = 'Waiting for GPS…';
 
@@ -148,12 +203,13 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
   // Catch counter animation
   late final AnimationController _catchAnimController;
-  late final Animation<double> _catchScaleAnim;
 
   // Cached location settings (avoid re-allocating per GPS event)
   late final LocationSettings _locationSettings;
   Position? _lastGoodPosition;
 
+  // Smooth Marker Interpolation Map
+  final Map<String, _MarkerAnimator> _interpolators = {};
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -165,11 +221,6 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
       vsync: this,
       duration: const Duration(milliseconds: 200),
     );
-    _catchScaleAnim = Tween<double>(begin: 1.0, end: 1.3).animate(
-      CurvedAnimation(parent: _catchAnimController, curve: Curves.elasticOut),
-    );
-
-
 
     if (kIsWeb) {
       _locationSettings = LocationSettings(
@@ -227,6 +278,13 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     _gameStatusSubscription?.cancel();
     _compassSubscription?.cancel();
     _cameraUpdateTimer?.cancel();
+
+    // Dispose active marker interpolators
+    for (final anim in _interpolators.values) {
+      anim.dispose();
+    }
+    _interpolators.clear();
+
     // Fire-and-forget – no need to await on dispose.
     _gameRef.child('locations/${widget.gameId}/${widget.userId}').remove();
     super.dispose();
@@ -243,18 +301,27 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
   // ── Timer ──────────────────────────────────────────────────────────────────
 
   void _loadGameDuration() {
-    _gameRef.child('active_games/${widget.gameId}').get().then((snapshot) {
-      if (!mounted) return;
-      if (snapshot.exists) {
-        final data = Map<dynamic, dynamic>.from(snapshot.value as Map);
-        final durationMinutes = (data['duration_minutes'] as num?)?.toInt() ?? 40;
-        setState(() {
-          _roomDurationSeconds = durationMinutes * 60;
+    _gameRef
+        .child('active_games/${widget.gameId}')
+        .get()
+        .then((snapshot) {
+          if (!mounted) return;
+          if (snapshot.exists) {
+            final data = Map<dynamic, dynamic>.from(snapshot.value as Map);
+            final durationMinutes =
+                (data['duration_minutes'] as num?)?.toInt() ?? 40;
+            final roomName =
+                data['room_name'] as String? ??
+                'PATROL ${widget.gameId.toUpperCase()}';
+            setState(() {
+              _roomDurationSeconds = durationMinutes * 60;
+              _roomName = roomName;
+            });
+          }
+        })
+        .catchError((err) {
+          debugPrint("Error loading game duration: $err");
         });
-      }
-    }).catchError((err) {
-      debugPrint("Error loading game duration: $err");
-    });
   }
 
   void _startTimer() {
@@ -291,7 +358,9 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
     Future.delayed(const Duration(seconds: 2), () async {
       if (!mounted) return;
-      await _gameRef.child('locations/${widget.gameId}/${widget.userId}').remove();
+      await _gameRef
+          .child('locations/${widget.gameId}/${widget.userId}')
+          .remove();
       if (mounted) Navigator.pop(context);
     });
   }
@@ -381,17 +450,18 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     }
 
     _onPositionUpdate(position);
-    await _animateToCurrentLocation();
+    await _updateCameraView();
 
-    _positionSubscription = Geolocator.getPositionStream(
-      locationSettings: _locationSettings,
-    ).listen(
-      _onPositionUpdate,
-      onError: (error) {
-        if (!mounted) return;
-        _setStatus('GPS stream error');
-      },
-    );
+    _positionSubscription =
+        Geolocator.getPositionStream(
+          locationSettings: _locationSettings,
+        ).listen(
+          _onPositionUpdate,
+          onError: (error) {
+            if (!mounted) return;
+            _setStatus('GPS stream error');
+          },
+        );
   }
 
   // Throttle: skip Firebase write if movement < 2 m to cut bandwidth.
@@ -417,10 +487,13 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     final movedEnough = _lastGoodPosition == null
         ? true
         : _haversineDistance(
-            latlng2.LatLng(_lastGoodPosition!.latitude, _lastGoodPosition!.longitude),
-            newLatLng,
-          ) >=
-            2.0;
+                latlng2.LatLng(
+                  _lastGoodPosition!.latitude,
+                  _lastGoodPosition!.longitude,
+                ),
+                newLatLng,
+              ) >=
+              2.0;
     final isAcceptable =
         (isInitial && isFirstAcceptable) ||
         (accuracy.isFinite && accuracy <= 100.0) ||
@@ -502,11 +575,39 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
     final visiblePlayers = _getVisiblePlayers(allPlayers);
 
-    final changed = _listChanged(visiblePlayers, _visiblePlayers);
-    if (changed) {
-      _markersNotifier.value = visiblePlayers.map(_buildMarker).toList();
-      setState(() => _visiblePlayers = visiblePlayers);
+    // Clean up old / disconnected player interpolators
+    final visiblePlayerIds = visiblePlayers.map((p) => p.id).toSet();
+    _interpolators.removeWhere((id, anim) {
+      if (!visiblePlayerIds.contains(id)) {
+        anim.dispose();
+        return true;
+      }
+      return false;
+    });
+
+    // Update or spawn new interpolators
+    for (final player in visiblePlayers) {
+      final targetLatLng = LatLng(player.lat, player.lng);
+      final anim = _interpolators[player.id];
+      if (anim == null) {
+        _interpolators[player.id] = _MarkerAnimator(
+          vsync: this,
+          start: targetLatLng,
+          end: targetLatLng,
+          onTick: _rebuildMarkersFromInterpolators,
+        );
+      } else {
+        // Trigger interpolation if target moved significantly
+        final diffLat = (anim._end.latitude - targetLatLng.latitude).abs();
+        final diffLng = (anim._end.longitude - targetLatLng.longitude).abs();
+        if (diffLat > 1e-6 || diffLng > 1e-6) {
+          anim.updateTarget(targetLatLng);
+        }
+      }
     }
+
+    _visiblePlayers = visiblePlayers;
+    _rebuildMarkersFromInterpolators();
 
     if (widget.isPolice) _checkCatches(allPlayers);
 
@@ -550,8 +651,12 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     }
   }
 
-  static bool _listChanged(
-      List<_PlayerData> next, List<_PlayerData> prev) {
+  void _rebuildMarkersFromInterpolators() {
+    if (!mounted) return;
+    _markersNotifier.value = _visiblePlayers.map(_buildMarker).toList();
+  }
+
+  static bool _listChanged(List<_PlayerData> next, List<_PlayerData> prev) {
     if (next.length != prev.length) return true;
     for (var i = 0; i < next.length; i++) {
       if (next[i] != prev[i]) return true;
@@ -561,15 +666,28 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
   Marker _buildMarker(_PlayerData player) {
     final isSelf = player.id == widget.userId;
-    
+    final anim = _interpolators[player.id];
+    final position = anim != null
+        ? anim.currentPosition
+        : LatLng(player.lat, player.lng);
+
     if (isSelf) {
       return Marker(
         markerId: MarkerId(player.id),
-        position: _toGoogleLatLng(_currentLocation),
+        position: _trackingMode == MapTrackingMode.none
+            ? position
+            : _toGoogleLatLng(_currentLocation),
+        alpha: _trackingMode == MapTrackingMode.none ? 1.0 : 0.0,
         visible: _trackingMode == MapTrackingMode.none,
         icon: player.isPolice
-            ? (_policeIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed))
-            : (_thiefIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen)),
+            ? (_policeIcon ??
+                  BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueRed,
+                  ))
+            : (_thiefIcon ??
+                  BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueGreen,
+                  )),
         anchor: const Offset(0.5, 1.0),
         infoWindow: InfoWindow(
           title: player.isPolice ? 'Police (You)' : 'Thief (You)',
@@ -581,10 +699,14 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
     return Marker(
       markerId: MarkerId(player.id),
-      position: LatLng(player.lat, player.lng),
+      position: position,
       icon: player.isPolice
-          ? (_policeIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed))
-          : (_thiefIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen)),
+          ? (_policeIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed))
+          : (_thiefIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                  BitmapDescriptor.hueGreen,
+                )),
       anchor: const Offset(0.5, 1.0),
       infoWindow: InfoWindow(
         title: player.isPolice ? 'Police' : 'Thief',
@@ -637,9 +759,9 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
         if (!mounted) return;
         setState(() => _catchCount++);
-        _catchAnimController
-            .forward()
-            .then((_) => _catchAnimController.reverse());
+        _catchAnimController.forward().then(
+          (_) => _catchAnimController.reverse(),
+        );
         _vibrate(0);
         _showFloatingNotification(
           title: '🏆 THIEF CAUGHT!',
@@ -659,15 +781,14 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     final dLon = (b.longitude - a.longitude) * pi / 180;
     final sinDLat = sin(dLat / 2);
     final sinDLon = sin(dLon / 2);
-    final h = sinDLat * sinDLat +
+    final h =
+        sinDLat * sinDLat +
         cos(a.latitude * pi / 180) *
             cos(b.latitude * pi / 180) *
             sinDLon *
             sinDLon;
     return r * 2 * atan2(sqrt(h), sqrt(1 - h));
   }
-
-
 
   Future<void> _vibrate(int type) async {
     final hasVibrator = await Vibration.hasVibrator();
@@ -684,8 +805,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
       barrierDismissible: false,
       builder: (ctx) => GameDialog(
         title: 'GPS Required',
-        message:
-            'Location services are turned off. Please enable GPS to play.',
+        message: 'Location services are turned off. Please enable GPS to play.',
         cancelLabel: 'Cancel',
         confirmLabel: 'Open Settings',
         onConfirm: () async {
@@ -850,7 +970,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
   List<_PlayerData> _getVisiblePlayers(List<_PlayerData> players) {
     final self = players.where((p) => p.id == widget.userId).toList();
     final others = players.where((p) => p.id != widget.userId).toList();
-    
+
     final List<_PlayerData> visibleOthers;
     if (widget.isPolice) {
       visibleOthers = others;
@@ -860,11 +980,8 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
         if (_policeRevealActive) ...others.where((p) => p.isPolice),
       ];
     }
-    
-    return [
-      ...self,
-      ...visibleOthers,
-    ];
+
+    return [...self, ...visibleOthers];
   }
 
   void _updateVisiblePlayers() {
@@ -920,20 +1037,38 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
                   child: TacticalPlayerPin(
                     isPolice: widget.isPolice,
                     bearing: _currentBearing,
-                    isNavigationMode: _trackingMode == MapTrackingMode.navigation,
+                    isNavigationMode:
+                        _trackingMode == MapTrackingMode.navigation,
                   ),
                 ),
               ),
             ),
             _buildTopBar(),
-            if (widget.isPolice) _buildCatchCounter(),
-            _buildRecenterButton(),
+            _buildMapControls(),
             _buildBottomPanel(),
           ],
         ),
       ),
     );
   }
+
+  static const String _darkMapStyle = '''
+[
+  {"elementType": "geometry", "stylers": [{"color": "#0a0f1d"}]},
+  {"elementType": "labels.text.fill", "stylers": [{"color": "#747d8c"}]},
+  {"elementType": "labels.text.stroke", "stylers": [{"color": "#0a0f1d"}]},
+  {"featureType": "administrative", "elementType": "geometry.stroke", "stylers": [{"color": "#2f3542"}]},
+  {"featureType": "landscape", "elementType": "geometry.fill", "stylers": [{"color": "#0f1524"}]},
+  {"featureType": "poi", "elementType": "geometry", "stylers": [{"color": "#0f1524"}]},
+  {"featureType": "poi", "elementType": "labels.text.fill", "stylers": [{"color": "#747d8c"}]},
+  {"featureType": "road", "elementType": "geometry", "stylers": [{"color": "#1e293b"}]},
+  {"featureType": "road", "elementType": "geometry.stroke", "stylers": [{"color": "#0f172a"}]},
+  {"featureType": "road", "elementType": "labels.text.fill", "stylers": [{"color": "#94a3b8"}]},
+  {"featureType": "road.highway", "elementType": "geometry", "stylers": [{"color": "#005b82"}, {"lightness": -20}]},
+  {"featureType": "transit", "elementType": "geometry", "stylers": [{"color": "#1e293b"}]},
+  {"featureType": "water", "elementType": "geometry", "stylers": [{"color": "#04080f"}]}
+]
+''';
 
   Widget _buildMap() {
     return ValueListenableBuilder<List<Marker>>(
@@ -949,6 +1084,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
           myLocationButtonEnabled: false,
           zoomControlsEnabled: false,
           compassEnabled: true,
+          style: _darkMapStyle,
           onMapCreated: (controller) {
             if (!_mapController.isCompleted) {
               _mapController.complete(controller);
@@ -962,6 +1098,9 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
               _updateMarkersList();
             }
           },
+          onCameraMove: (position) {
+            _currentCameraPosition = position;
+          },
           markers: Set<Marker>.of(markers),
         );
       },
@@ -972,23 +1111,35 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     return LatLng(point.latitude, point.longitude);
   }
 
-  Future<void> _animateToCurrentLocation() async {
+  Future<void> _updateCameraView() async {
     if (!_mapController.isCompleted) return;
     final controller = await _mapController.future;
-    
-    final targetBearing = _trackingMode == MapTrackingMode.navigation ? _currentBearing : 0.0;
-    final targetTilt = _trackingMode == MapTrackingMode.navigation ? 45.0 : 0.0;
+
+    LatLng targetLatLng;
+    double targetZoom = _kDefaultZoom;
+
+    if (_trackingMode != MapTrackingMode.none) {
+      targetLatLng = _toGoogleLatLng(_currentLocation);
+    } else if (_currentCameraPosition != null) {
+      targetLatLng = _currentCameraPosition!.target;
+      targetZoom = _currentCameraPosition!.zoom;
+    } else {
+      targetLatLng = _toGoogleLatLng(_currentLocation);
+    }
+
+    final targetBearing = _autoRotate ? _currentBearing : 0.0;
+    final targetTilt = _is3dMode ? 45.0 : 0.0;
 
     _isProgrammaticMove = true;
-    _lastAnimatedLocation = _toGoogleLatLng(_currentLocation);
+    _lastAnimatedLocation = targetLatLng;
     _lastAnimatedBearing = targetBearing;
     _lastAnimatedTilt = targetTilt;
 
     await controller.animateCamera(
       CameraUpdate.newCameraPosition(
         CameraPosition(
-          target: _toGoogleLatLng(_currentLocation),
-          zoom: _kDefaultZoom,
+          target: targetLatLng,
+          zoom: targetZoom,
           bearing: targetBearing,
           tilt: targetTilt,
         ),
@@ -1010,8 +1161,9 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
         _hasCompass = true;
         // Exponential Moving Average (EMA) using vector components to smooth out compass jitter
         final rad = heading * pi / 180.0;
-        const alpha = 0.15; // smoothing factor (0.15 gives a smooth but responsive transition)
-        
+        const alpha =
+            0.15; // smoothing factor (0.15 gives a smooth but responsive transition)
+
         if (_smoothDx == 0.0 && _smoothDy == 0.0) {
           _smoothDx = cos(rad);
           _smoothDy = sin(rad);
@@ -1019,7 +1171,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
           _smoothDx = _smoothDx * (1 - alpha) + cos(rad) * alpha;
           _smoothDy = _smoothDy * (1 - alpha) + sin(rad) * alpha;
         }
-        
+
         double calculatedBearing = atan2(_smoothDy, _smoothDx) * 180.0 / pi;
         if (calculatedBearing < 0) {
           calculatedBearing += 360.0;
@@ -1031,13 +1183,17 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
   void _startCameraUpdateTimer() {
     _cameraUpdateTimer?.cancel();
-    _cameraUpdateTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+    _cameraUpdateTimer = Timer.periodic(const Duration(milliseconds: 100), (
+      timer,
+    ) {
       _updateCameraTick();
     });
   }
 
   void _updateMarkersList() {
-    final visiblePlayers = _getVisiblePlayers(_latestPlayers.isEmpty ? _visiblePlayers : _latestPlayers);
+    final visiblePlayers = _getVisiblePlayers(
+      _latestPlayers.isEmpty ? _visiblePlayers : _latestPlayers,
+    );
     _markersNotifier.value = visiblePlayers.map(_buildMarker).toList();
     if (mounted) {
       setState(() {});
@@ -1046,23 +1202,43 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
   void _updateCameraTick() async {
     if (!_gameRunning || !mounted) return;
-    
-    final targetLatLng = _toGoogleLatLng(_currentLocation);
-    final targetBearing = _trackingMode == MapTrackingMode.navigation ? _currentBearing : 0.0;
-    final targetTilt = _trackingMode == MapTrackingMode.navigation ? 45.0 : 0.0;
+
+    LatLng targetLatLng;
+    double targetZoom = _kDefaultZoom;
+    if (_trackingMode != MapTrackingMode.none) {
+      targetLatLng = _toGoogleLatLng(_currentLocation);
+    } else if (_currentCameraPosition != null) {
+      targetLatLng = _currentCameraPosition!.target;
+      targetZoom = _currentCameraPosition!.zoom;
+    } else {
+      targetLatLng = _toGoogleLatLng(_currentLocation);
+    }
+
+    final targetBearing = _autoRotate ? _currentBearing : 0.0;
+    final targetTilt = _is3dMode ? 45.0 : 0.0;
 
     // Check if we actually need to animate
-    final locChanged = _lastAnimatedLocation == null ||
-        _haversineDistance(_currentLocation, latlng2.LatLng(_lastAnimatedLocation!.latitude, _lastAnimatedLocation!.longitude)) > 0.2;
-    
+    final locChanged =
+        _lastAnimatedLocation == null ||
+        _haversineDistance(
+              _currentLocation,
+              latlng2.LatLng(
+                _lastAnimatedLocation!.latitude,
+                _lastAnimatedLocation!.longitude,
+              ),
+            ) >
+            0.2;
+
     double bearingDiff = 0.0;
     if (_lastAnimatedBearing != null) {
       double diff = (targetBearing - _lastAnimatedBearing!).abs();
-      bearingDiff = diff > 180 ? 360 - diff : diff;
+      diff = diff > 180 ? 360 - diff : diff;
+      bearingDiff = diff;
     }
-    
+
     final bearingChanged = _lastAnimatedBearing == null || bearingDiff > 0.5;
-    final tiltChanged = _lastAnimatedTilt == null || _lastAnimatedTilt != targetTilt;
+    final tiltChanged =
+        _lastAnimatedTilt == null || _lastAnimatedTilt != targetTilt;
 
     // Rebuild marker list if position or rotation has updated to keep them perfectly in sync
     if (locChanged || bearingChanged || tiltChanged) {
@@ -1084,7 +1260,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: targetLatLng,
-            zoom: _kDefaultZoom,
+            zoom: targetZoom,
             bearing: targetBearing,
             tilt: targetTilt,
           ),
@@ -1102,16 +1278,16 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
 
   Future<void> _initMarkerIcons() async {
     final thief = await _createCustomMarker(
-      false, 
-      const Color(0xFF2ECC71), 
-      const Color(0xFF27AE60)
+      false,
+      const Color(0xFF2ECC71),
+      const Color(0xFF27AE60),
     );
     final police = await _createCustomMarker(
-      true, 
-      const Color(0xFFFF3366), 
-      const Color(0xFFC0392B)
+      true,
+      const Color(0xFFFF3366),
+      const Color(0xFFC0392B),
     );
-    
+
     if (mounted) {
       setState(() {
         _thiefIcon = thief;
@@ -1120,14 +1296,23 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     }
   }
 
-  Future<BitmapDescriptor> _createCustomMarker(bool isPolice, Color backgroundColor, Color borderColor) async {
+  Future<BitmapDescriptor> _createCustomMarker(
+    bool isPolice,
+    Color backgroundColor,
+    Color borderColor,
+  ) async {
+    final double devicePixelRatio = WidgetsBinding.instance.platformDispatcher.views.first.devicePixelRatio;
+    // Scale for crispness AND size reduction (0.5 scale = 40x50 logical size)
+    final double imageScale = devicePixelRatio * 0.5;
+
     final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(pictureRecorder);
-    
+    canvas.scale(imageScale, imageScale);
+
     // Using larger canvas size for extreme high-DPI crispness on all devices (80x100)
     const double width = 80.0;
     const double height = 100.0;
-    
+
     // Draw the ambient drop shadow underneath the pin's bottom tip (perfectly aligned with (40.0, 88.0))
     final Paint shadowPaint = Paint()
       ..color = Colors.black.withValues(alpha: 0.35)
@@ -1150,13 +1335,24 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
       radius: const Radius.circular(22.0),
       clockwise: true,
     ); // top circle head
-    pinPath.cubicTo(62.0, 36.0, 62.0, 56.0, 40.0, 88.0); // right head to pointer tip
+    pinPath.cubicTo(
+      62.0,
+      36.0,
+      62.0,
+      56.0,
+      40.0,
+      88.0,
+    ); // right head to pointer tip
     pinPath.close();
 
     // Premium Linear Gradient matching the role
-    final Color colorDark = isPolice ? const Color(0xFF0F172A) : const Color(0xFF0D0D0D);
-    final Color colorLight = isPolice ? const Color(0xFF1E40AF) : const Color(0xFF065F46);
-    
+    final Color colorDark = isPolice
+        ? const Color(0xFF0F172A)
+        : const Color(0xFF0D0D0D);
+    final Color colorLight = isPolice
+        ? const Color(0xFF1E40AF)
+        : const Color(0xFF065F46);
+
     final Paint pinPaint = Paint()
       ..shader = ui.Gradient.linear(
         const Offset(40.0, 14.0),
@@ -1167,7 +1363,9 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     canvas.drawPath(pinPath, pinPaint);
 
     // Dynamic glowing outer neon border matching role
-    final Color neonGlowColor = isPolice ? const Color(0xFF00D4FF) : const Color(0xFF00FF88);
+    final Color neonGlowColor = isPolice
+        ? const Color(0xFF00D4FF)
+        : const Color(0xFF00FF88);
     final Paint glowPaint = Paint()
       ..color = neonGlowColor.withValues(alpha: 0.4)
       ..style = PaintingStyle.stroke
@@ -1216,7 +1414,11 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
       canvas.drawPath(shieldPath, emblemPaint);
 
       // Mini inner core star dot
-      canvas.drawCircle(const Offset(40.0, 36.5), 1.5, Paint()..color = Colors.white);
+      canvas.drawCircle(
+        const Offset(40.0, 36.5),
+        1.5,
+        Paint()..color = Colors.white,
+      );
     } else {
       // Sleek cyberpunk stealth chevron/hood vector
       final Path thiefPath = Path();
@@ -1234,16 +1436,28 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
         ..color = const Color(0xFF00FF88)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5;
-      canvas.drawLine(const Offset(36.0, 35.0), const Offset(44.0, 35.0), visorPaint);
+      canvas.drawLine(
+        const Offset(36.0, 35.0),
+        const Offset(44.0, 35.0),
+        visorPaint,
+      );
     }
 
-    final ui.Image image = await pictureRecorder.endRecording().toImage(width.toInt(), height.toInt());
-    final ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    
+    final ui.Image image = await pictureRecorder.endRecording().toImage(
+      (width * imageScale).toInt(),
+      (height * imageScale).toInt(),
+    );
+    final ByteData? byteData = await image.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+
     if (byteData == null) {
       return BitmapDescriptor.defaultMarker;
     }
-    return BitmapDescriptor.bytes(byteData.buffer.asUint8List());
+    return BitmapDescriptor.bytes(
+      byteData.buffer.asUint8List(),
+      imagePixelRatio: devicePixelRatio,
+    );
   }
 
   Widget _buildTopBar() {
@@ -1252,56 +1466,213 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
       top: MediaQuery.of(context).padding.top + 8,
       left: 12,
       right: 12,
-      child: _GlassCard(
-        child: Row(
+      child: LiquidGlassContainer(
+        borderRadius: 24,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            _RoleIcon(isPolice: widget.isPolice),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    widget.isPolice ? 'POLICE MODE' : 'THIEF MODE',
-                    style: GoogleFonts.bangers(
-                      fontSize: 15,
-                      color: Colors.white,
-                      letterSpacing: 1,
+            // Row 1: Room Name & Timer
+            Row(
+              children: [
+                const Icon(
+                  Icons.gps_fixed_rounded,
+                  size: 16,
+                  color: AppTheme.accent,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _roomName.isNotEmpty
+                        ? _roomName.toUpperCase()
+                        : 'PATROL ${widget.gameId.toUpperCase()}',
+                    style: GoogleFonts.spaceMono(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: AppTheme.textPrimary,
+                      letterSpacing: 1.0,
                     ),
                   ),
-                  Row(
-                    children: [
-                      Icon(
-                        isGpsActive ? Icons.gps_fixed : Icons.gps_off,
-                        size: 11,
-                        color: isGpsActive
-                            ? Colors.greenAccent
-                            : Colors.red,
+                ),
+                ValueListenableBuilder<int>(
+                  valueListenable: _elapsedSeconds,
+                  builder: (_, seconds, __) {
+                    final remaining = max(0, _roomDurationSeconds - seconds);
+                    return Text(
+                      _formatTime(remaining),
+                      style: GoogleFonts.spaceMono(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
                       ),
-                      const SizedBox(width: 4),
-                      Flexible(
-                        child: Text(
-                          _locationStatus,
-                          style: GoogleFonts.poppins(
-                            fontSize: 10,
-                            color: Colors.white60,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                    );
+                  },
+                ),
+              ],
+            ),
+            const Divider(color: Colors.white10, height: 16, thickness: 1),
+            // Row 2: Role Info, GPS Status & catches/hints pill
+            Row(
+              children: [
+                // Role Icon
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.08),
+                    ),
+                  ),
+                  child: Icon(
+                    widget.isPolice
+                        ? Icons.local_police_rounded
+                        : Icons.person_rounded,
+                    color: widget.isPolice
+                        ? AppTheme.accent
+                        : AppTheme.thiefAccent,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Mode and GPS
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        widget.isPolice ? 'POLICE MODE' : 'THIEF MODE',
+                        style: GoogleFonts.spaceMono(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          letterSpacing: 0.5,
                         ),
+                      ),
+                      Row(
+                        children: [
+                          Icon(
+                            isGpsActive
+                                ? Icons.check_circle_rounded
+                                : Icons.gps_off_rounded,
+                            size: 12,
+                            color: isGpsActive
+                                ? AppTheme.success
+                                : AppTheme.danger,
+                          ),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              _locationStatus,
+                              style: AppTheme.bodySmall.copyWith(
+                                fontSize: 10,
+                                color: AppTheme.textSecondary,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                ],
-              ),
-            ),
-            // Only the timer text rebuilds every second – not the whole top bar.
-            ValueListenableBuilder<int>(
-              valueListenable: _elapsedSeconds,
-              builder: (_, seconds, __) {
-                final remaining = max(0, _roomDurationSeconds - seconds);
-                return _TimerDisplay(time: _formatTime(remaining));
-              },
+                ),
+                // Action Pill (Catches for police, Hint for thief)
+                if (widget.isPolice)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [AppTheme.warning, AppTheme.danger],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppTheme.warning.withValues(alpha: 0.4),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.star_rounded,
+                          size: 14,
+                          color: Colors.white,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '$_catchCount CATCHES',
+                          style: GoogleFonts.spaceMono(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                  )
+                else
+                  GestureDetector(
+                    onTap: _remainingHints > 0 && !_policeRevealActive
+                        ? _useHint
+                        : null,
+                    child: Opacity(
+                      opacity: _remainingHints > 0 && !_policeRevealActive
+                          ? 1.0
+                          : 0.6,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [AppTheme.accent, AppTheme.accentSoft],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppTheme.accent.withValues(alpha: 0.3),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.lightbulb_rounded,
+                              size: 14,
+                              color: Colors.white,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              _policeRevealActive
+                                  ? 'ACTIVE'
+                                  : 'HINT ($_remainingHints)',
+                              style: GoogleFonts.spaceMono(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ],
         ),
@@ -1309,138 +1680,135 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     );
   }
 
-  Widget _buildCatchCounter() {
+  Widget _buildMapControls() {
+    final bottomOffset = widget.isPolice ? 120.0 : 185.0;
+
     return Positioned(
-      top: MediaQuery.of(context).padding.top + 86,
+      bottom: bottomOffset,
       right: 12,
-      child: AnimatedBuilder(
-        animation: _catchScaleAnim,
-        builder: (context, child) =>
-            Transform.scale(scale: _catchScaleAnim.value, child: child),
-        child: Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [AppTheme.warning, AppTheme.danger],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 1. 3D Mode Button
+          _buildCircleButton(
+            onPressed: () {
+              setState(() {
+                _is3dMode = !_is3dMode;
+              });
+              _updateCameraView();
+            },
+            isActive: _is3dMode,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Transform.rotate(
+                  angle: _is3dMode ? pi / 4 : 0,
+                  child: Icon(
+                    Icons.loop_rounded,
+                    size: 34,
+                    color: Colors.white.withValues(alpha: 0.9),
+                  ),
+                ),
+                Text(
+                  '3D',
+                  style: GoogleFonts.spaceMono(
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
             ),
-            borderRadius: BorderRadius.circular(40),
-            boxShadow: [
-              BoxShadow(
-                color: AppTheme.warning.withValues(alpha: 0.5),
-                blurRadius: 16,
-                spreadRadius: 2,
-                offset: const Offset(0, 6),
-              ),
-            ],
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              AnimatedRotation(
-                turns: _catchCount > 0 ? 0.1 : 0.0,
-                duration: const Duration(milliseconds: 200),
-                child: const Icon(
-                  Icons.star_rounded,
-                  color: Colors.white,
-                  size: 22,
-                ),
+          const SizedBox(height: 12),
+          // 2. Compass Button
+          _buildCircleButton(
+            onPressed: () {
+              setState(() {
+                _autoRotate = !_autoRotate;
+                if (!_autoRotate) {
+                  _currentBearing = 0.0;
+                }
+              });
+              _updateCameraView();
+            },
+            isActive: _autoRotate,
+            isPrimaryColor: _autoRotate,
+            child: Transform.rotate(
+              angle: -_currentBearing * pi / 180,
+              child: const Icon(
+                Icons.explore_rounded,
+                size: 26,
+                color: Colors.white,
               ),
-              const SizedBox(width: 8),
-              Text(
-                '$_catchCount',
-                style: GoogleFonts.bangers(
-                  fontSize: 22,
-                  color: Colors.white,
-                  shadows: const [
-                    Shadow(
-                      offset: Offset(1, 1),
-                      blurRadius: 2,
-                      color: Colors.black26,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 4),
-              Text(
-                'CATCH',
-                style: GoogleFonts.poppins(
-                  fontSize: 12,
-                  color: Colors.white70,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
+          const SizedBox(height: 12),
+          // 3. Centralization Button
+          _buildCircleButton(
+            onPressed: () {
+              setState(() {
+                _trackingMode = MapTrackingMode.follow;
+              });
+              _updateCameraView();
+              _updateMarkersList();
+            },
+            isActive: _trackingMode != MapTrackingMode.none,
+            child: const Icon(
+              Icons.gps_fixed_rounded,
+              size: 22,
+              color: Colors.white,
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildRecenterButton() {
-    final bottomOffset = widget.isPolice ? 120.0 : 185.0;
-    final active = _trackingMode != MapTrackingMode.none;
-    return Positioned(
-      bottom: bottomOffset,
-      right: 12,
-      child: GestureDetector(
-        onTapDown: (_) => setState(() => _recenterPressed = true),
-        onTapUp: (_) => setState(() => _recenterPressed = false),
-        onTapCancel: () => setState(() => _recenterPressed = false),
-        onTap: () {
-          // Reset the programmatic-move flag before we animate so any
-          // in-flight camera update doesn't get mis-classified as a user drag.
-          _isProgrammaticMove = false;
-          setState(() {
-            if (_trackingMode == MapTrackingMode.none) {
-              _trackingMode = MapTrackingMode.follow;
-            } else if (_trackingMode == MapTrackingMode.follow) {
-              _trackingMode = MapTrackingMode.navigation;
-            } else {
-              _trackingMode = MapTrackingMode.follow;
-            }
-          });
-          _updateMarkersList();
-          _animateToCurrentLocation();
-        },
-        child: AnimatedScale(
-          scale: _recenterPressed ? 0.90 : 1.0,
-          duration: const Duration(milliseconds: 100),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 250),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: active ? AppTheme.accent : Colors.black87,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: (active ? AppTheme.accent : Colors.black)
-                      .withValues(alpha: active ? 0.5 : 0.3),
-                  blurRadius: active ? 14 : 8,
-                  spreadRadius: active ? 2 : 0,
-                  offset: const Offset(0, 4),
+  Widget _buildCircleButton({
+    required VoidCallback onPressed,
+    required bool isActive,
+    required Widget child,
+    bool isPrimaryColor = false,
+  }) {
+    return GestureDetector(
+      onTap: onPressed,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        width: 52,
+        height: 52,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: isPrimaryColor
+              ? const LinearGradient(
+                  colors: [AppTheme.accentSoft, AppTheme.accent],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                )
+              : LinearGradient(
+                  colors: isActive
+                      ? [AppTheme.secondary, Colors.black]
+                      : [Colors.black.withValues(alpha: 0.7), Colors.black54],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
                 ),
-              ],
-              border: Border.all(
-                color: active
-                    ? AppTheme.accentSoft.withValues(alpha: 0.5)
-                    : Colors.white.withValues(alpha: 0.1),
-                width: 1.5,
-              ),
-            ),
-            child: Icon(
-              _trackingMode == MapTrackingMode.none
-                  ? Icons.location_searching
-                  : _trackingMode == MapTrackingMode.follow
-                      ? Icons.my_location
-                      : Icons.explore,
-              color: Colors.white,
-              size: 24,
-            ),
+          border: Border.all(
+            color: isActive
+                ? AppTheme.accent.withValues(alpha: 0.6)
+                : Colors.white.withValues(alpha: 0.12),
+            width: 1.5,
           ),
+          boxShadow: [
+            BoxShadow(
+              color:
+                  (isPrimaryColor || isActive ? AppTheme.accent : Colors.black)
+                      .withValues(alpha: 0.25),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
+        child: Center(child: child),
       ),
     );
   }
@@ -1458,9 +1826,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Icon(
-                  widget.isPolice
-                      ? Icons.gps_fixed
-                      : Icons.directions_run,
+                  widget.isPolice ? Icons.gps_fixed : Icons.directions_run,
                   color: Colors.amber.shade400,
                   size: 16,
                 ),
@@ -1513,14 +1879,15 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
                     active: _policeRevealActive,
                   ),
                   ElevatedButton.icon(
-                    onPressed:
-                        _remainingHints > 0 && !_policeRevealActive
-                            ? _useHint
-                            : null,
+                    onPressed: _remainingHints > 0 && !_policeRevealActive
+                        ? _useHint
+                        : null,
                     icon: const Icon(Icons.visibility),
-                    label: Text(_policeRevealActive
-                        ? 'REVEALING...'
-                        : 'USE HINT ($_remainingHints)'),
+                    label: Text(
+                      _policeRevealActive
+                          ? 'REVEALING...'
+                          : 'USE HINT ($_remainingHints)',
+                    ),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.amber.shade700,
                       foregroundColor: Colors.black,
@@ -1528,7 +1895,9 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
                         borderRadius: BorderRadius.circular(16),
                       ),
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 12),
+                        horizontal: 12,
+                        vertical: 12,
+                      ),
                     ),
                   ),
                 ],
@@ -1549,55 +1918,16 @@ class _GlassCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return LiquidGlassContainer(
+      borderRadius: 20,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xDD000000), Color(0x99000000)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.3),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
       child: child,
     );
   }
 }
 
-class _RoleIcon extends StatelessWidget {
-  const _RoleIcon({required this.isPolice});
-  final bool isPolice;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Icon(
-        isPolice ? Icons.local_police : Icons.person,
-        color: Colors.white,
-        size: 22,
-      ),
-    );
-  }
-}
-
 class _HintStatusChip extends StatelessWidget {
-  const _HintStatusChip({
-    required this.remainingHints,
-    required this.active,
-  });
+  const _HintStatusChip({required this.remainingHints, required this.active});
 
   final int remainingHints;
   final bool active;
@@ -1626,39 +1956,6 @@ class _HintStatusChip extends StatelessWidget {
               color: Colors.white,
               fontWeight: FontWeight.w600,
             ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TimerDisplay extends StatelessWidget {
-  const _TimerDisplay({required this.time});
-  final String time;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            time,
-            style: GoogleFonts.spaceMono(
-              fontSize: 18,
-              color: Colors.white,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          Text(
-            'TIME REMAINING',
-            style: GoogleFonts.poppins(fontSize: 8, color: Colors.white60),
           ),
         ],
       ),
@@ -1745,14 +2042,21 @@ class _FloatingNotificationState extends State<_FloatingNotification>
       duration: const Duration(milliseconds: 600),
     );
     _scaleAnim = Tween<double>(begin: 0.85, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: const Interval(0.0, 0.7, curve: Curves.elasticOut)),
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.0, 0.7, curve: Curves.easeOutCubic),
+      ),
     );
     _fadeAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: const Interval(0.0, 0.4, curve: Curves.easeIn)),
+      CurvedAnimation(
+        parent: _controller,
+        curve: const Interval(0.0, 0.4, curve: Curves.easeIn),
+      ),
     );
-    _slideAnim = Tween<Offset>(begin: const Offset(0.0, -0.6), end: Offset.zero).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.elasticOut),
-    );
+    _slideAnim = Tween<Offset>(
+      begin: const Offset(0.0, -0.6),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic));
     _controller.forward();
   }
 
@@ -1765,9 +2069,9 @@ class _FloatingNotificationState extends State<_FloatingNotification>
   @override
   Widget build(BuildContext context) {
     return Positioned(
-      top: MediaQuery.of(context).size.height * 0.14,
-      left: 16,
-      right: 16,
+      top: MediaQuery.of(context).padding.top + 8,
+      left: 12,
+      right: 12,
       child: Material(
         color: Colors.transparent,
         child: SlideTransition(
@@ -1776,93 +2080,64 @@ class _FloatingNotificationState extends State<_FloatingNotification>
             scale: _scaleAnim,
             child: FadeTransition(
               opacity: _fadeAnim,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(24),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 10.0, sigmaY: 10.0),
-                  child: Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          widget.color.withValues(alpha: 0.15),
-                          widget.color.withValues(alpha: 0.05),
+              child: LiquidGlassContainer(
+                borderRadius: 24,
+                padding: const EdgeInsets.all(16),
+                accentColor: widget.color,
+                borderWidth: 2.0,
+                blurSigma: 20.0,
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            widget.color,
+                            widget.color.withValues(alpha: 0.8),
+                          ],
+                        ),
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: widget.color.withValues(alpha: 0.5),
+                            blurRadius: 10,
+                            spreadRadius: 1,
+                          ),
                         ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
                       ),
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(
-                        color: widget.color.withValues(alpha: 0.45),
-                        width: 1.5,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: widget.color.withValues(alpha: 0.25),
-                          blurRadius: 20,
-                          offset: const Offset(0, 8),
-                          spreadRadius: 2,
-                        ),
-                      ],
+                      child: Icon(widget.icon, color: Colors.white, size: 24),
                     ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                widget.color,
-                                widget.color.withValues(alpha: 0.8),
-                              ],
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          GlowText(
+                            widget.title,
+                            glowColor: widget.color,
+                            glowRadius: 6,
+                            style: AppTheme.bangersStyle(
+                              fontSize: 18,
+                              letterSpacing: 0.8,
+                              color: Colors.white,
                             ),
-                            shape: BoxShape.circle,
-                            boxShadow: [
-                              BoxShadow(
-                                color: widget.color.withValues(alpha: 0.5),
-                                blurRadius: 10,
-                                spreadRadius: 1,
-                              ),
-                            ],
                           ),
-                          child: Icon(widget.icon, color: Colors.white, size: 26),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                widget.title,
-                                style: GoogleFonts.bangers(
-                                  fontSize: 18,
-                                  color: Colors.white,
-                                  letterSpacing: 0.8,
-                                  shadows: [
-                                    Shadow(
-                                      offset: const Offset(1, 1),
-                                      blurRadius: 4,
-                                      color: Colors.black.withValues(alpha: 0.6),
-                                    ),
-                                  ],
-                                ),
+                          const SizedBox(height: 4),
+                          Text(
+                            widget.message,
+                            style: AppTheme.bodyMedium.copyWith(
+                              fontSize: 12,
+                              color: AppTheme.textPrimary.withValues(
+                                alpha: 0.9,
                               ),
-                              const SizedBox(height: 4),
-                              Text(
-                                widget.message,
-                                style: GoogleFonts.poppins(
-                                  fontSize: 12,
-                                  color: Colors.white.withValues(alpha: 0.85),
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
               ),
             ),
@@ -1900,17 +2175,17 @@ class _TacticalPlayerPinState extends State<TacticalPlayerPin>
   @override
   void initState() {
     super.initState();
-    
+
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2200),
     )..repeat();
-    
+
     _rotateController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 8000),
     )..repeat();
-    
+
     _breathController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2500),
@@ -1928,12 +2203,20 @@ class _TacticalPlayerPinState extends State<TacticalPlayerPin>
   @override
   Widget build(BuildContext context) {
     // Designer theme colors
-    final Color themeColor = widget.isPolice ? const Color(0xFF00E5FF) : const Color(0xFF39FF14);
-    final Color coreBorderColor = widget.isPolice ? const Color(0xFFE0F2FE) : const Color(0xFFD1FAE5);
-    final Color darkBackdrop = widget.isPolice ? const Color(0xFF0F172A) : const Color(0xFF0D0D0D);
+    final Color themeColor = widget.isPolice
+        ? const Color(0xFF00E5FF)
+        : const Color(0xFF39FF14);
+    final Color coreBorderColor = widget.isPolice
+        ? const Color(0xFFE0F2FE)
+        : const Color(0xFFD1FAE5);
+    final Color darkBackdrop = widget.isPolice
+        ? const Color(0xFF0F172A)
+        : const Color(0xFF0D0D0D);
 
     // Target angle in radians
-    final double targetAngle = widget.isNavigationMode ? 0.0 : (widget.bearing * pi / 180.0);
+    final double targetAngle = widget.isNavigationMode
+        ? 0.0
+        : (widget.bearing * pi / 180.0);
 
     return SizedBox(
       width: 110,
@@ -2019,8 +2302,9 @@ class _TacticalPlayerPinState extends State<TacticalPlayerPin>
           AnimatedBuilder(
             animation: _breathController,
             builder: (context, child) {
-              final double breathScale = 0.94 + 0.08 * sin(_breathController.value * 2 * pi);
-              
+              final double breathScale =
+                  0.94 + 0.08 * sin(_breathController.value * 2 * pi);
+
               return Transform.scale(
                 scale: breathScale,
                 child: Container(
@@ -2041,14 +2325,14 @@ class _TacticalPlayerPinState extends State<TacticalPlayerPin>
                         offset: const Offset(0, 3),
                       ),
                     ],
-                    border: Border.all(
-                      color: coreBorderColor,
-                      width: 2.0,
-                    ),
+                    border: Border.all(color: coreBorderColor, width: 2.0),
                   ),
                   child: CustomPaint(
                     size: const Size(34, 34),
-                    painter: _TacticalCorePainter(isPolice: widget.isPolice, themeColor: themeColor),
+                    painter: _TacticalCorePainter(
+                      isPolice: widget.isPolice,
+                      themeColor: themeColor,
+                    ),
                   ),
                 ),
               );
@@ -2099,9 +2383,17 @@ class _TacticalReticlePainter extends CustomPainter {
     // Top, Right, Bottom, Left ticks
     const double tickLength = 5.0;
     canvas.drawLine(Offset(radius, 0), Offset(radius, tickLength), tickPaint);
-    canvas.drawLine(Offset(radius, size.height), Offset(radius, size.height - tickLength), tickPaint);
+    canvas.drawLine(
+      Offset(radius, size.height),
+      Offset(radius, size.height - tickLength),
+      tickPaint,
+    );
     canvas.drawLine(Offset(0, radius), Offset(tickLength, radius), tickPaint);
-    canvas.drawLine(Offset(size.width, radius), Offset(size.width - tickLength, radius), tickPaint);
+    canvas.drawLine(
+      Offset(size.width, radius),
+      Offset(size.width - tickLength, radius),
+      tickPaint,
+    );
   }
 
   @override
@@ -2166,15 +2458,39 @@ class _TacticalCorePainter extends CustomPainter {
       // Sleek tactical shield
       final Path shieldPath = Path();
       shieldPath.moveTo(radius, radius - 7);
-      shieldPath.quadraticBezierTo(radius + 5.5, radius - 7, radius + 5.5, radius - 2);
-      shieldPath.quadraticBezierTo(radius + 5.5, radius + 4, radius, radius + 9);
-      shieldPath.quadraticBezierTo(radius - 5.5, radius + 4, radius - 5.5, radius - 2);
-      shieldPath.quadraticBezierTo(radius - 5.5, radius - 7, radius, radius - 7);
+      shieldPath.quadraticBezierTo(
+        radius + 5.5,
+        radius - 7,
+        radius + 5.5,
+        radius - 2,
+      );
+      shieldPath.quadraticBezierTo(
+        radius + 5.5,
+        radius + 4,
+        radius,
+        radius + 9,
+      );
+      shieldPath.quadraticBezierTo(
+        radius - 5.5,
+        radius + 4,
+        radius - 5.5,
+        radius - 2,
+      );
+      shieldPath.quadraticBezierTo(
+        radius - 5.5,
+        radius - 7,
+        radius,
+        radius - 7,
+      );
       shieldPath.close();
       canvas.drawPath(shieldPath, emblemPaint);
 
       // Star core dot
-      canvas.drawCircle(Offset(radius, radius + 0.5), 1.5, Paint()..color = Colors.white);
+      canvas.drawCircle(
+        Offset(radius, radius + 0.5),
+        1.5,
+        Paint()..color = Colors.white,
+      );
     } else {
       // Sleek ninja/cyber mask
       final Path thiefPath = Path();
@@ -2192,13 +2508,17 @@ class _TacticalCorePainter extends CustomPainter {
         ..color = themeColor
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5;
-      canvas.drawLine(Offset(radius - 4.5, radius - 1), Offset(radius + 4.5, radius - 1), visorPaint);
+      canvas.drawLine(
+        Offset(radius - 4.5, radius - 1),
+        Offset(radius + 4.5, radius - 1),
+        visorPaint,
+      );
     }
   }
 
   @override
   bool shouldRepaint(covariant _TacticalCorePainter oldDelegate) {
-    return oldDelegate.isPolice != isPolice || oldDelegate.themeColor != themeColor;
+    return oldDelegate.isPolice != isPolice ||
+        oldDelegate.themeColor != themeColor;
   }
 }
-

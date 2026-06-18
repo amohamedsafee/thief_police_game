@@ -1,12 +1,17 @@
 import 'dart:math';
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../core/app_theme.dart';
 import '../core/app_router.dart';
 import '../core/game_dialog.dart';
+import '../core/design_system.dart';
 import 'free_map_game_screen.dart';
+
+enum LobbyTab {
+  browse,
+  host,
+}
 
 class LobbyScreen extends StatefulWidget {
   const LobbyScreen({super.key, required this.userId});
@@ -19,22 +24,38 @@ class LobbyScreen extends StatefulWidget {
 class _LobbyScreenState extends State<LobbyScreen> {
   final DatabaseReference _db = FirebaseDatabase.instance.ref();
 
+  LobbyTab _currentTab = LobbyTab.browse;
+
   List<_GameEntry> _games = [];
   bool _isLoading = true;
   bool _isCreating = false;
+
+  // Host configuration state
+  int _selectedMaxThieves = 5;
+  int _selectedDurationMinutes = 45;
+  bool _isCustomDuration = false;
+  double _customDuration = 45.0;
 
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   String _searchQuery = '';
 
+  final TextEditingController _roomNameController = TextEditingController();
+  final FocusNode _roomNameFocusNode = FocusNode();
+
   @override
   void initState() {
     super.initState();
     _searchFocusNode.addListener(_onSearchFocusChange);
+    _roomNameFocusNode.addListener(_onRoomNameFocusChange);
     _db.child('active_games').onValue.listen(_onGamesSnapshot);
   }
 
   void _onSearchFocusChange() {
+    setState(() {});
+  }
+
+  void _onRoomNameFocusChange() {
     setState(() {});
   }
 
@@ -43,6 +64,9 @@ class _LobbyScreenState extends State<LobbyScreen> {
     _searchFocusNode.removeListener(_onSearchFocusChange);
     _searchFocusNode.dispose();
     _searchController.dispose();
+    _roomNameFocusNode.removeListener(_onRoomNameFocusChange);
+    _roomNameFocusNode.dispose();
+    _roomNameController.dispose();
     super.dispose();
   }
 
@@ -118,7 +142,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
     }
   }
 
-  Future<void> _createGame({int maxThieves = 5, int durationMinutes = 40}) async {
+  Future<void> _createGame({int maxThieves = 5, int durationMinutes = 40, String roomName = ''}) async {
     if (_isCreating) return;
     setState(() => _isCreating = true);
 
@@ -141,6 +165,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
       'created_at': ServerValue.timestamp,
       'max_thieves': maxThieves,
       'duration_minutes': durationMinutes,
+      'room_name': roomName.isNotEmpty ? roomName : 'PATROL $roomCode',
     });
 
     if (!mounted) return;
@@ -331,13 +356,15 @@ class _LobbyScreenState extends State<LobbyScreen> {
           child: Column(
             children: [
               _buildHeader(),
-              _buildCreateButton(),
-              const SizedBox(height: 15),
-              _buildSearchBar(),
-              const SizedBox(height: 10),
-              _buildActiveGamesLabel(),
-              const SizedBox(height: 15),
-              Expanded(child: _buildGamesList()),
+              _buildTabBar(),
+              Expanded(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 250),
+                  child: _currentTab == LobbyTab.browse
+                      ? _buildBrowsePanel()
+                      : _buildHostPanel(),
+                ),
+              ),
             ],
           ),
         ),
@@ -347,15 +374,15 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
   Widget _buildHeader() {
     return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
-        decoration: AppTheme.surfaceCardDecoration(),
-        child: Column(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: LiquidGlassContainer(
+        borderRadius: 20,
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        child: Row(
           children: [
             RadarScanner(
               child: Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   gradient: const LinearGradient(
@@ -363,38 +390,36 @@ class _LobbyScreenState extends State<LobbyScreen> {
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: AppTheme.accent.withValues(alpha: 0.4),
-                      blurRadius: 15,
-                      spreadRadius: 2,
+                      color: AppTheme.accent.withValues(alpha: 0.35),
+                      blurRadius: 12,
+                      spreadRadius: 1,
                     ),
                   ],
                 ),
-                child: const Icon(Icons.sports_esports_rounded, size: 36, color: Colors.white),
+                child: const Icon(Icons.sports_esports_rounded, size: 24, color: Colors.white),
               ),
             ),
-            const SizedBox(height: 12),
-            Text(
-              'GAME LOBBY',
-              style: GoogleFonts.bangers(
-                fontSize: 34,
-                color: Colors.white,
-                letterSpacing: 2.5,
-                shadows: [
-                  Shadow(
-                    offset: const Offset(2, 2),
-                    blurRadius: 6,
-                    color: Colors.black.withValues(alpha: 0.5),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  GlowText(
+                    'GAME LOBBY',
+                    glowColor: AppTheme.accent,
+                    glowRadius: 6,
+                    style: AppTheme.bangersStyle(
+                      fontSize: 26,
+                      letterSpacing: 1.5,
+                      color: Colors.white,
+                    ),
+                  ),
+                  Text(
+                    'Choose your workspace and start the chase',
+                    style: AppTheme.bodySmall,
                   ),
                 ],
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Choose your role and start the chase',
-              style: GoogleFonts.poppins(
-                fontSize: 13,
-                color: Colors.white60,
-                fontWeight: FontWeight.w500,
               ),
             ),
           ],
@@ -403,408 +428,351 @@ class _LobbyScreenState extends State<LobbyScreen> {
     );
   }
 
-  void _showRoomConfigBottomSheet() {
-    int selectedMaxThieves = 5;
-    int selectedDurationMinutes = 45;
-    bool isCustomDuration = false;
-    double customDuration = 45.0;
+  Widget _buildTabBar() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      child: GlassSegmentedControl<LobbyTab>(
+        segments: const {
+          LobbyTab.browse: 'ACTIVE CHASES',
+          LobbyTab.host: 'CREATE CHASE',
+        },
+        selectedSegment: _currentTab,
+        onSegmentSelected: (tab) {
+          setState(() {
+            _currentTab = tab;
+          });
+        },
+      ),
+    );
+  }
 
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) {
-        return BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 12.0, sigmaY: 12.0),
-          child: StatefulBuilder(
-            builder: (context, setModalState) {
-              return Container(
-              padding: EdgeInsets.only(
-                left: 20,
-                right: 20,
-                top: 16,
-                bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+  Widget _buildBrowsePanel() {
+    return Column(
+      key: const ValueKey('browse'),
+      children: [
+        const SizedBox(height: 10),
+        _buildSearchBar(),
+        const SizedBox(height: 14),
+        _buildActiveGamesLabel(),
+        const SizedBox(height: 10),
+        Expanded(child: _buildGamesList()),
+      ],
+    );
+  }
+
+  Widget _buildHostPanel() {
+    return SingleChildScrollView(
+      key: const ValueKey('host'),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      child: LiquidGlassContainer(
+        borderRadius: 24,
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [AppTheme.danger, AppTheme.warning],
+                    ),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.local_police_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    GlowText(
+                      'HOST CONFIGURATION',
+                      glowColor: AppTheme.accent,
+                      glowRadius: 6,
+                      style: AppTheme.bangersStyle(
+                        fontSize: 22,
+                        letterSpacing: 1,
+                        color: Colors.white,
+                      ),
+                    ),
+                    Text(
+                      'Configure your tactical room parameters',
+                      style: AppTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const Divider(color: Colors.white12, height: 28),
+            Text(
+              'ROOM NAME',
+              style: GoogleFonts.spaceMono(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                color: AppTheme.accent,
+                letterSpacing: 1.5,
               ),
-              decoration: AppTheme.surfaceCardDecoration(),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 50,
-                      height: 5,
+            ),
+            const SizedBox(height: 10),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.04),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: _roomNameFocusNode.hasFocus
+                      ? AppTheme.accent.withValues(alpha: 0.4)
+                      : Colors.white.withValues(alpha: 0.05),
+                  width: 1.5,
+                ),
+              ),
+              child: TextField(
+                controller: _roomNameController,
+                focusNode: _roomNameFocusNode,
+                style: GoogleFonts.poppins(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+                decoration: InputDecoration(
+                  hintText: 'ENTER ROOM NAME (e.g. ALPHA PATROL)...',
+                  hintStyle: GoogleFonts.poppins(
+                    color: Colors.white.withValues(alpha: 0.3),
+                    fontSize: 13,
+                  ),
+                  prefixIcon: const Icon(Icons.edit_road_rounded, color: Colors.white38),
+                  border: InputBorder.none,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'MAX THIEVES IN ROOM',
+              style: GoogleFonts.spaceMono(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                color: AppTheme.accent,
+                letterSpacing: 1.5,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [3, 5, 8, 10].map((count) {
+                final isSelected = _selectedMaxThieves == count;
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _selectedMaxThieves = count;
+                      });
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      margin: const EdgeInsets.symmetric(horizontal: 3),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.2),
-                        borderRadius: BorderRadius.circular(10),
+                        gradient: isSelected
+                            ? LinearGradient(
+                                colors: [AppTheme.accent.withValues(alpha: 0.2), AppTheme.secondary.withValues(alpha: 0.6)],
+                              )
+                            : null,
+                        color: isSelected ? null : Colors.white.withValues(alpha: 0.02),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: isSelected ? AppTheme.accent : Colors.white.withValues(alpha: 0.05),
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Center(
+                        child: Text(
+                          '$count',
+                          style: AppTheme.bodyLarge.copyWith(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: isSelected ? Colors.white : AppTheme.textSecondary,
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [AppTheme.danger, AppTheme.warning],
-                          ),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.local_police_rounded,
-                          color: Colors.white,
-                          size: 28,
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'CHASE DURATION',
+                  style: GoogleFonts.spaceMono(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.accent,
+                    letterSpacing: 1.5,
+                  ),
+                ),
+                Text(
+                  _isCustomDuration
+                      ? '${_customDuration.toInt()} Mins'
+                      : '$_selectedDurationMinutes Mins',
+                  style: GoogleFonts.spaceMono(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.accent,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [5, 15, 30, 45].map<Widget>((minutes) {
+                final isSelected = !_isCustomDuration && _selectedDurationMinutes == minutes;
+                return GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _isCustomDuration = false;
+                      _selectedDurationMinutes = minutes;
+                    });
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(
+                      gradient: isSelected
+                          ? LinearGradient(
+                              colors: [AppTheme.accent.withValues(alpha: 0.2), AppTheme.secondary.withValues(alpha: 0.6)],
+                            )
+                          : null,
+                      color: isSelected ? null : Colors.white.withValues(alpha: 0.02),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: isSelected ? AppTheme.accent : Colors.white.withValues(alpha: 0.05),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Text(
+                      '$minutes Min',
+                      style: AppTheme.bodyMedium.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: isSelected ? Colors.white : AppTheme.textSecondary,
+                      ),
+                    ),
+                  ),
+                );
+              }).toList()
+                ..add(
+                  GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _isCustomDuration = true;
+                      });
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      decoration: BoxDecoration(
+                        gradient: _isCustomDuration
+                            ? LinearGradient(
+                                colors: [AppTheme.accent.withValues(alpha: 0.2), AppTheme.secondary.withValues(alpha: 0.6)],
+                              )
+                            : null,
+                        color: _isCustomDuration ? null : Colors.white.withValues(alpha: 0.02),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: _isCustomDuration ? AppTheme.accent : Colors.white.withValues(alpha: 0.05),
+                          width: 1.5,
                         ),
                       ),
-                      const SizedBox(width: 15),
-                      Column(
+                      child: Text(
+                        'Custom ⚙️',
+                        style: AppTheme.bodyMedium.copyWith(
+                          fontWeight: FontWeight.bold,
+                          color: _isCustomDuration ? Colors.white : AppTheme.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeInOut,
+              child: Container(
+                height: _isCustomDuration ? null : 0,
+                padding: const EdgeInsets.only(top: 18),
+                child: _isCustomDuration
+                    ? Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            'CHASE CONFIGURATION',
-                            style: GoogleFonts.bangers(
-                              fontSize: 24,
-                              color: Colors.white,
-                              letterSpacing: 1.5,
+                          SliderTheme(
+                            data: SliderTheme.of(context).copyWith(
+                              activeTrackColor: AppTheme.accent,
+                              inactiveTrackColor: Colors.white10,
+                              thumbColor: Colors.white,
+                              overlayColor: AppTheme.accent.withValues(alpha: 0.2),
+                              valueIndicatorColor: AppTheme.accent,
+                              valueIndicatorTextStyle: GoogleFonts.spaceMono(color: AppTheme.primary),
                             ),
-                          ),
-                          Text(
-                            'Fine-tune the room parameters',
-                            style: GoogleFonts.poppins(
-                              fontSize: 12,
-                              color: Colors.white70,
+                            child: Slider(
+                              value: _customDuration,
+                              min: 1,
+                              max: 120,
+                              divisions: 119,
+                              label: '${_customDuration.toInt()} Min',
+                              onChanged: (value) {
+                                setState(() {
+                                  _customDuration = value;
+                                });
+                              },
                             ),
                           ),
                         ],
-                      ),
-                    ],
-                  ),
-                  const Divider(color: Colors.white12, height: 30),
-                  Text(
-                    'MAX THIEVES',
-                    style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: AppTheme.accentSoft,
-                      letterSpacing: 1,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [3, 5, 8, 10].map((count) {
-                      final isSelected = selectedMaxThieves == count;
-                      return Expanded(
-                        child: GestureDetector(
-                          onTap: () {
-                            setModalState(() {
-                              selectedMaxThieves = count;
-                            });
-                          },
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            margin: const EdgeInsets.symmetric(horizontal: 4),
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            decoration: BoxDecoration(
-                              gradient: isSelected
-                                  ? const LinearGradient(
-                                      colors: [AppTheme.accent, AppTheme.secondary],
-                                    )
-                                  : null,
-                              color: isSelected
-                                  ? null
-                                  : AppTheme.overlay,
-                              borderRadius: BorderRadius.circular(15),
-                              border: Border.all(
-                                color: isSelected
-                                    ? AppTheme.accent
-                                    : AppTheme.divider,
-                                width: 1.5,
-                              ),
-                            ),
-                            child: Center(
-                              child: Text(
-                                '$count Thieves',
-                                style: GoogleFonts.poppins(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: isSelected ? Colors.white : Colors.white70,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 25),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'CHASE DURATION',
-                        style: GoogleFonts.poppins(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: AppTheme.accentSoft,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                      Text(
-                        isCustomDuration
-                            ? '${customDuration.toInt()} Mins'
-                            : '$selectedDurationMinutes Mins',
-                        style: GoogleFonts.spaceMono(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: AppTheme.accentSoft,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [5, 15, 30, 45].map<Widget>((minutes) {
-                      final isSelected = !isCustomDuration && selectedDurationMinutes == minutes;
-                      return GestureDetector(
-                        onTap: () {
-                          setModalState(() {
-                            isCustomDuration = false;
-                            selectedDurationMinutes = minutes;
-                          });
-                        },
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 200),
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                          decoration: BoxDecoration(
-                            gradient: isSelected
-                                ? const LinearGradient(
-                                    colors: [AppTheme.accentSoft, AppTheme.accent],
-                                  )
-                                : null,
-                            color: isSelected
-                                ? null
-                                : AppTheme.overlay,
-                            borderRadius: BorderRadius.circular(15),
-                            border: Border.all(
-                              color: isSelected
-                                  ? AppTheme.accentSoft
-                                  : AppTheme.divider,
-                              width: 1.5,
-                            ),
-                          ),
-                          child: Text(
-                            '$minutes Min',
-                            style: GoogleFonts.poppins(
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                              color: isSelected ? Colors.white : Colors.white70,
-                            ),
-                          ),
-                        ),
-                      );
-                    }).toList()
-                      ..add(
-                        GestureDetector(
-                          onTap: () {
-                            setModalState(() {
-                              isCustomDuration = true;
-                            });
-                          },
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                            decoration: BoxDecoration(
-                              gradient: isCustomDuration
-                                  ? const LinearGradient(
-                                      colors: [AppTheme.accentSoft, AppTheme.accent],
-                                    )
-                                  : null,
-                              color: isCustomDuration
-                                  ? null
-                                  : AppTheme.overlay,
-                              borderRadius: BorderRadius.circular(15),
-                              border: Border.all(
-                                color: isCustomDuration
-                                    ? AppTheme.accentSoft
-                                    : AppTheme.divider,
-                                width: 1.5,
-                              ),
-                            ),
-                            child: Text(
-                              'Custom ⚙️',
-                              style: GoogleFonts.poppins(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: isCustomDuration ? Colors.white : Colors.white70,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                  ),
-                  AnimatedSize(
-                    duration: const Duration(milliseconds: 250),
-                    curve: Curves.easeInOut,
-                    child: Container(
-                      height: isCustomDuration ? null : 0,
-                      padding: const EdgeInsets.only(top: 15),
-                      child: isCustomDuration
-                          ? Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Text(
-                                      'Drag to select custom time:',
-                                      style: GoogleFonts.poppins(
-                                        fontSize: 11,
-                                        color: Colors.white60,
-                                      ),
-                                    ),
-                                    Text(
-                                      '${customDuration.toInt()} Minutes',
-                                      style: GoogleFonts.spaceMono(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                SliderTheme(
-                                  data: SliderTheme.of(context).copyWith(
-                                    activeTrackColor: AppTheme.accent,
-                                    inactiveTrackColor: AppTheme.overlay,
-                                    thumbColor: Colors.white,
-                                    overlayColor: AppTheme.accent.withValues(alpha: 0.2),
-                                    valueIndicatorColor: AppTheme.accent,
-                                    valueIndicatorTextStyle: GoogleFonts.spaceMono(color: AppTheme.primary),
-                                  ),
-                                  child: Slider(
-                                    value: customDuration,
-                                    min: 1,
-                                    max: 120,
-                                    divisions: 119,
-                                    label: '${customDuration.toInt()} Min',
-                                    onChanged: (value) {
-                                      setModalState(() {
-                                        customDuration = value;
-                                      });
-                                    },
-                                  ),
-                                ),
-                              ],
-                            )
-                          : const SizedBox.shrink(),
-                    ),
-                  ),
-                  const SizedBox(height: 35),
-                  ElevatedButton(
-                    onPressed: () {
-                      Navigator.pop(context);
-                      final duration = isCustomDuration
-                          ? customDuration.toInt()
-                          : selectedDurationMinutes;
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+            const SizedBox(height: 32),
+            NeoGlassButton(
+              onPressed: _isCreating
+                  ? null
+                  : () {
+                      final duration = _isCustomDuration
+                          ? _customDuration.toInt()
+                          : _selectedDurationMinutes;
                       _createGame(
-                        maxThieves: selectedMaxThieves,
+                        maxThieves: _selectedMaxThieves,
                         durationMinutes: duration,
+                        roomName: _roomNameController.text.trim(),
                       );
                     },
-                    style: ElevatedButton.styleFrom(
-                      padding: EdgeInsets.zero,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      elevation: 8,
-                      shadowColor: AppTheme.shadow,
-                    ),
-                    child: Ink(
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [AppTheme.accentSoft, AppTheme.accent],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Container(
-                        height: 65,
-                        alignment: Alignment.center,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.flash_on_rounded, size: 28, color: Colors.white),
-                            const SizedBox(width: 10),
-                            Text(
-                              'LAUNCH CHASE ⚡',
-                              style: GoogleFonts.bangers(
-                                fontSize: 22,
-                                color: Colors.white,
-                                letterSpacing: 1.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+              accentColor: AppTheme.accent,
+              glowing: true,
+              height: 60,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.flash_on_rounded, size: 24, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Text(
+                    'LAUNCH CHASE ⚡',
+                    style: AppTheme.bangersStyle(
+                      fontSize: 20,
+                      letterSpacing: 1.5,
+                      color: Colors.white,
                     ),
                   ),
                 ],
               ),
-            );
-          },
-        ),
-      );
-    },
-  );
-  }
-
-  Widget _buildCreateButton() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: ShinyGlazeButton(
-        child: ElevatedButton(
-          onPressed: _isCreating ? null : _showRoomConfigBottomSheet,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppTheme.accent,
-            disabledBackgroundColor: AppTheme.surface.withValues(alpha: 0.85),
-            minimumSize: const Size(double.infinity, 70),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-            elevation: 0,
-          ),
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            child: _isCreating
-                ? const SizedBox(
-                    key: ValueKey('loading'),
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Colors.white,
-                    ),
-                  )
-                : Row(
-                    key: const ValueKey('label'),
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.local_police, size: 30, color: Colors.white),
-                      const SizedBox(width: 15),
-                      Text(
-                        'CREATE GAME AS POLICE',
-                        style: GoogleFonts.bangers(
-                          fontSize: 22,
-                          color: Colors.white,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                    ],
-                  ),
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -962,125 +930,108 @@ class _GameCardState extends State<_GameCard> {
         duration: const Duration(milliseconds: 100),
         child: Container(
           margin: const EdgeInsets.only(bottom: 12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(22),
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                Colors.white.withValues(alpha: 0.05),
-                Colors.white.withValues(alpha: 0.02),
-              ],
-            ),
-            border: Border.all(
-              color: Colors.white.withValues(alpha: 0.08),
-              width: 1.5,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.25),
-                blurRadius: 15,
-                offset: const Offset(0, 6),
-              ),
-            ],
-          ),
-          child: ListTile(
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            leading: Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Colors.blue.shade500, Colors.purple.shade500],
-                ),
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.blue.withValues(alpha: 0.3),
-                    blurRadius: 8,
+          child: LiquidGlassContainer(
+            borderRadius: 22,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            accentColor: isCreator ? AppTheme.accent : AppTheme.thiefAccent,
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: isCreator
+                        ? [AppTheme.accent, AppTheme.secondary]
+                        : [AppTheme.thiefAccent, AppTheme.secondary],
                   ),
-                ],
-              ),
-              child: const Icon(Icons.sports_esports_rounded, color: Colors.white, size: 28),
-            ),
-            title: Text(
-              'ROOM ${widget.game.id}',
-              style: GoogleFonts.spaceMono(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-                letterSpacing: 2.0,
-              ),
-            ),
-            subtitle: Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Row(
-                children: [
-                  Icon(Icons.people_alt_rounded, size: 15, color: Colors.white38),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${widget.game.thiefCount}/${widget.game.maxThieves} thieves',
-                    style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      color: Colors.white70,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (isCreator) ...[
-                    const SizedBox(width: 12),
-                    Container(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [Colors.blue.shade500, Colors.indigo.shade600],
-                        ),
-                        borderRadius: BorderRadius.circular(8),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.blue.withValues(alpha: 0.3),
-                            blurRadius: 6,
-                          ),
-                        ],
-                      ),
-                      child: Text(
-                        'HOST',
-                        style: GoogleFonts.poppins(
-                          fontSize: 9,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: (isCreator ? AppTheme.accent : AppTheme.thiefAccent).withValues(alpha: 0.3),
+                      blurRadius: 8,
                     ),
                   ],
-                ],
+                ),
+                child: Icon(
+                  isCreator ? Icons.local_police_rounded : Icons.directions_run_rounded,
+                  color: Colors.white,
+                  size: 24,
+                ),
               ),
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (isCreator) ...[
-                  IconButton(
-                    onPressed: widget.onDelete,
-                    icon: const Icon(
-                      Icons.delete_outline_rounded,
-                      color: Colors.redAccent,
-                      size: 24,
+              title: Text(
+                'ROOM ${widget.game.id}',
+                style: GoogleFonts.spaceMono(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                  letterSpacing: 2.0,
+                ),
+              ),
+              subtitle: Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  children: [
+                    const Icon(Icons.people_alt_rounded, size: 14, color: AppTheme.textSecondary),
+                    const SizedBox(width: 6),
+                    Text(
+                      '${widget.game.thiefCount}/${widget.game.maxThieves} thieves',
+                      style: AppTheme.bodySmall,
                     ),
-                    tooltip: 'Delete Game',
-                    style: IconButton.styleFrom(
-                      backgroundColor: Colors.redAccent.withValues(alpha: 0.1),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                    if (isCreator) ...[
+                      const SizedBox(width: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [AppTheme.accent, AppTheme.secondary],
+                          ),
+                          borderRadius: BorderRadius.circular(8),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppTheme.accent.withValues(alpha: 0.2),
+                              blurRadius: 4,
+                            ),
+                          ],
+                        ),
+                        child: Text(
+                          'HOST',
+                          style: GoogleFonts.spaceMono(
+                            fontSize: 8,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isCreator) ...[
+                    IconButton(
+                      onPressed: widget.onDelete,
+                      icon: const Icon(
+                        Icons.delete_outline_rounded,
+                        color: AppTheme.danger,
+                        size: 22,
+                      ),
+                      tooltip: 'Delete Game',
+                      style: IconButton.styleFrom(
+                        backgroundColor: AppTheme.danger.withValues(alpha: 0.1),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
                     ),
+                    const SizedBox(width: 8),
+                  ],
+                  AnimatedJoinButton(
+                    onTap: widget.onJoin,
                   ),
-                  const SizedBox(width: 8),
                 ],
-                AnimatedJoinButton(
-                  onTap: widget.onJoin,
-                ),
-              ],
+              ),
             ),
           ),
         ),

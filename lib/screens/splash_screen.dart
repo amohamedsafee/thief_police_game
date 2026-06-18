@@ -1,10 +1,12 @@
 import 'dart:math';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shimmer/shimmer.dart';
 import '../core/app_theme.dart';
 import '../core/app_router.dart';
+import '../core/design_system.dart';
 import 'lobby_screen.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -109,161 +111,245 @@ class _SplashScreenState extends State<SplashScreen>
         decoration: BoxDecoration(
           gradient: AppTheme.mainGradient(),
         ),
-        child: Center(
-          child: AnimatedBuilder(
-            animation: _controller,
-            builder: (context, child) => FadeTransition(
-              opacity: _fadeAnim,
-              child: ScaleTransition(scale: _scaleAnim, child: child),
+        child: Stack(
+          children: [
+            // Ambient floating glowing orbs (background layer)
+            Positioned(
+              top: -100,
+              left: -50,
+              child: Container(
+                width: 250,
+                height: 250,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AppTheme.accent.withValues(alpha: 0.08),
+                ),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 80, sigmaY: 80),
+                  child: Container(color: Colors.transparent),
+                ),
+              ),
             ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                AnimatedBuilder(
-                  animation: _pulseController,
-                  builder: (context, _) {
-                    return Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: const LinearGradient(
-                          colors: [
-                            AppTheme.accent,
-                            AppTheme.secondary,
+            Positioned(
+              bottom: -150,
+              right: -50,
+              child: Container(
+                width: 300,
+                height: 300,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AppTheme.thiefAccent.withValues(alpha: 0.06),
+                ),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 90, sigmaY: 90),
+                  child: Container(color: Colors.transparent),
+                ),
+              ),
+            ),
+            
+            // Core UI Content
+            Center(
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (context, child) => FadeTransition(
+                  opacity: _fadeAnim,
+                  child: ScaleTransition(scale: _scaleAnim, child: child),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Multi-layered Breathing & Rotating Tactical Core
+                    AnimatedBuilder(
+                      animation: _pulseController,
+                      builder: (context, _) {
+                        return Container(
+                          padding: const EdgeInsets.all(28),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: LinearGradient(
+                              colors: [
+                                AppTheme.accent.withValues(alpha: 0.15),
+                                AppTheme.secondary.withValues(alpha: 0.6),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: AppTheme.accent.withValues(alpha: 0.2 + _pulseAnim.value * 0.15),
+                                blurRadius: 30 + _pulseAnim.value * 15,
+                                spreadRadius: 1 + _pulseAnim.value * 2,
+                              ),
+                              BoxShadow(
+                                color: AppTheme.thiefAccent.withValues(alpha: 0.08 + _pulseAnim.value * 0.08),
+                                blurRadius: 45,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.09),
+                              width: 1.5,
+                            ),
+                          ),
+                          child: ClipOval(
+                            child: BackdropFilter(
+                              filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                              child: Transform.rotate(
+                                angle: _pulseController.value * 2 * pi,
+                                child: Icon(
+                                  Icons.gps_fixed_rounded,
+                                  size: 80,
+                                  color: Color.lerp(Colors.white, AppTheme.accent, 0.3),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 50),
+                    
+                    // Logo Title with accessible neon dropshadow
+                    Shimmer.fromColors(
+                      baseColor: AppTheme.textPrimary,
+                      highlightColor: AppTheme.accent,
+                      period: const Duration(seconds: 3),
+                      child: GlowText(
+                        'THIEF & POLICE',
+                        glowColor: AppTheme.accent,
+                        glowRadius: 12,
+                        style: AppTheme.bangersStyle(
+                          fontSize: 52,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    
+                    // Subtitle
+                    Text(
+                      'REAL-TIME LOCATION CHASE',
+                      style: GoogleFonts.spaceMono(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: AppTheme.textSecondary,
+                        letterSpacing: 4.0,
+                      ),
+                    ),
+                    const SizedBox(height: 60),
+                    
+                    // Status / Connection Panel
+                    if (_errorMessage == null) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.03),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(AppTheme.accent),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Text(
+                              _isRetrying ? 'AUTHENTICATING...' : 'LOADING GAME...',
+                              style: GoogleFonts.spaceMono(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: AppTheme.textSecondary,
+                                letterSpacing: 1,
+                              ),
+                            ),
                           ],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppTheme.accent.withValues(alpha: 0.25 + _pulseAnim.value * 0.15),
-                            blurRadius: 25 + _pulseAnim.value * 15,
-                            spreadRadius: 1 + _pulseAnim.value * 2,
-                          ),
-                          BoxShadow(
-                            color: AppTheme.danger.withValues(alpha: 0.10 + _pulseAnim.value * 0.1),
-                            blurRadius: 40,
-                            offset: const Offset(0, 10),
-                          ),
-                        ],
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.12),
-                          width: 1.5,
                         ),
                       ),
-                      child: Transform.rotate(
-                        angle: _pulseController.value * 2 * pi,
-                        child: const Icon(
-                          Icons.gps_fixed_rounded,
-                          size: 90,
-                          color: Colors.white,
+                    ] else ...[
+                      // Premium Liquid Glass Error Box
+                      Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 32),
+                        padding: const EdgeInsets.all(24),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.04),
+                          borderRadius: BorderRadius.circular(24),
+                          border: Border.all(
+                            color: AppTheme.danger.withValues(alpha: 0.35),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppTheme.danger.withValues(alpha: 0.08),
+                              blurRadius: 20,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(24),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                            child: Column(
+                              children: [
+                                const Icon(Icons.cloud_off, color: AppTheme.danger, size: 48),
+                                const SizedBox(height: 16),
+                                Text(
+                                  'CONNECTION ERROR',
+                                  style: AppTheme.bangersStyle(
+                                    fontSize: 22,
+                                    letterSpacing: 1,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                const SizedBox(height: 10),
+                                Text(
+                                  _errorMessage!.contains('bad-app-id') || _errorMessage!.contains('FirebaseOptions')
+                                      ? 'The Firebase configuration is invalid. Please verify the credentials in lib/firebase_options.dart.'
+                                      : _errorMessage!.contains('network') || _errorMessage!.contains('offline') || _errorMessage!.contains('SocketException')
+                                          ? 'Network connection failed. Please check your internet connection and try again.'
+                                          : 'Setup error details:\n$_errorMessage',
+                                  style: AppTheme.bodyMedium.copyWith(fontSize: 12),
+                                  textAlign: TextAlign.center,
+                                ),
+                                const SizedBox(height: 24),
+                                NeoGlassButton(
+                                  onPressed: _signInAndNavigate,
+                                  accentColor: AppTheme.danger,
+                                  height: 48,
+                                  glowing: true,
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      const Icon(Icons.refresh_rounded, color: Colors.white, size: 18),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        'RETRY CONNECTION',
+                                        style: AppTheme.bangersStyle(
+                                          fontSize: 16,
+                                          letterSpacing: 0.8,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
-                    );
-                  },
+                    ],
+                  ],
                 ),
-                const SizedBox(height: 40),
-                Shimmer.fromColors(
-                  baseColor: AppTheme.textPrimary,
-                  highlightColor: AppTheme.accent,
-                  child: Text(
-                    'THIEF & POLICE',
-                    style: GoogleFonts.bangers(
-                      fontSize: 48,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                      shadows: [
-                        Shadow(
-                          offset: const Offset(2, 2),
-                          blurRadius: 4,
-                          color: Colors.black.withValues(alpha: 0.5),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  'REAL-TIME LOCATION CHASE',
-                  style: GoogleFonts.poppins(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: AppTheme.textSecondary,
-                    letterSpacing: 3.0,
-                  ),
-                ),
-                const SizedBox(height: 40),
-                if (_errorMessage == null) ...[
-                  CircularProgressIndicator(
-                    valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.accent),
-                    backgroundColor: Colors.white.withValues(alpha: 0.05),
-                    strokeWidth: 3.5,
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    _isRetrying ? 'Authenticating...' : 'Loading Game...',
-                    style: GoogleFonts.poppins(
-                      fontSize: 14,
-                      color: Colors.white60,
-                    ),
-                  ),
-                ] else ...[
-                  Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 24),
-                    padding: const EdgeInsets.all(20),
-                    decoration: AppTheme.surfaceCardDecoration(),
-                    child: Column(
-                      children: [
-                        const Icon(Icons.cloud_off, color: Colors.redAccent, size: 44),
-                        const SizedBox(height: 12),
-                        Text(
-                          'CONNECTION / CONFIG ERROR',
-                          style: GoogleFonts.bangers(
-                            fontSize: 18,
-                            color: Colors.white,
-                            letterSpacing: 1,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _errorMessage!.contains('bad-app-id') || _errorMessage!.contains('FirebaseOptions')
-                              ? 'The Firebase configuration is invalid or missing the correct Android App credentials in lib/firebase_options.dart. Please run "flutterfire configure" or manually update it.'
-                              : _errorMessage!.contains('network') || _errorMessage!.contains('offline') || _errorMessage!.contains('SocketException')
-                                  ? 'Network connection failed. Please check your internet connection and try again.'
-                                  : 'Setup error details:\n$_errorMessage',
-                          style: GoogleFonts.poppins(
-                            fontSize: 12,
-                            color: Colors.white70,
-                          ),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 20),
-                        ElevatedButton.icon(
-                          onPressed: _signInAndNavigate,
-                          icon: const Icon(Icons.refresh, color: AppTheme.primary),
-                          label: Text(
-                            'RETRY CONNECTION',
-                            style: GoogleFonts.bangers(
-                              fontSize: 16,
-                              color: AppTheme.primary,
-                              letterSpacing: 1,
-                            ),
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppTheme.accentSoft,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ],
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );
