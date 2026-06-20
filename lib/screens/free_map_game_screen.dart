@@ -155,7 +155,8 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
   final Completer<GoogleMapController> _mapController =
       Completer<GoogleMapController>();
   MapTrackingMode _trackingMode = MapTrackingMode.follow;
-  bool _isProgrammaticMove = false;
+  int _programmaticMoveCount = 0;
+  bool get _isProgrammaticMove => _programmaticMoveCount > 0;
 
   // Compass and Smooth Camera Animation
   StreamSubscription<CompassEvent>? _compassSubscription;
@@ -1130,7 +1131,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     final targetBearing = _autoRotate ? _currentBearing : 0.0;
     final targetTilt = _is3dMode ? 45.0 : 0.0;
 
-    _isProgrammaticMove = true;
+    _programmaticMoveCount++;
     _lastAnimatedLocation = targetLatLng;
     _lastAnimatedBearing = targetBearing;
     _lastAnimatedTilt = targetTilt;
@@ -1148,8 +1149,8 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     );
 
     Future.delayed(const Duration(milliseconds: 350), () {
-      if (mounted) {
-        _isProgrammaticMove = false;
+      if (mounted && _programmaticMoveCount > 0) {
+        _programmaticMoveCount--;
       }
     });
   }
@@ -1251,7 +1252,7 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
     final controller = await _mapController.future;
 
     if (locChanged || bearingChanged || tiltChanged) {
-      _isProgrammaticMove = true;
+      _programmaticMoveCount++;
       _lastAnimatedLocation = targetLatLng;
       _lastAnimatedBearing = targetBearing;
       _lastAnimatedTilt = targetTilt;
@@ -1269,8 +1270,8 @@ class _FreeMapGameScreenState extends State<FreeMapGameScreen>
       );
 
       Future.delayed(const Duration(milliseconds: 200), () {
-        if (mounted) {
-          _isProgrammaticMove = false;
+        if (mounted && _programmaticMoveCount > 0) {
+          _programmaticMoveCount--;
         }
       });
     }
